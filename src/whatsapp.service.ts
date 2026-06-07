@@ -54,48 +54,57 @@ export class WhatsappService {
   }
 
   getStatus() {
-    // Si tenemos socket y tiene información de usuario, es una señal fuerte de que está conectado
-    const isSocketConnected = this.socket?.user ? true : this.connected;
-    
     return {
-      connected: isSocketConnected,
+      connected: this.connected,
       hasQr: Boolean(this.latestQr),
-      user: this.socket?.user || null
+      user: this.connected ? this.socket?.user : null
     };
   }
 
   getQr() {
-    if (!this.socket && !this.initializing) {
-      console.log('No hay socket, intentando conectar para generar QR...');
+    if (!this.connected && !this.initializing && !this.latestQr) {
+      console.log('No hay conexión activa ni QR, intentando conectar...');
       this.connect().catch(err => console.error('connect error', err));
     }
     
     return {
-      connected: this.socket?.user ? true : this.connected,
+      connected: this.connected,
       qr: this.latestQr,
     };
   }
 
   async logout(): Promise<void> {
     if (this.socket) {
-      await this.socket.logout();
+      try {
+        await this.socket.logout();
+      } catch (error) {
+        console.error('Error during socket logout:', error);
+      }
       this.socket = null;
-      this.connected = false;
-      this.latestQr = null;
     }
+    
+    this.connected = false;
+    this.latestQr = null;
 
-    const authDir =
-      process.env.WHATSAPP_AUTH_DIR ?? path.join(process.cwd(), 'whatsapp-session');
-    if (fs.existsSync(authDir)) {
-      fs.rmSync(authDir, { recursive: true, force: true });
-      console.log('Archivos de sesión eliminados correctamente');
-    }
-
+    this.clearSession();
     console.log('Sesión de WhatsApp cerrada correctamente');
   }
 
+  private clearSession() {
+    const authDir =
+      process.env.WHATSAPP_AUTH_DIR ?? path.join(process.cwd(), 'whatsapp-session');
+    if (fs.existsSync(authDir)) {
+      try {
+        fs.rmSync(authDir, { recursive: true, force: true });
+        console.log('Archivos de sesión eliminados correctamente');
+      } catch (error) {
+        console.error('Error eliminando archivos de sesión:', error);
+      }
+    }
+  }
+
   private async ensureConnected() {
-    if (!this.socket) {
+    if (!this.connected) {
       await this.connect();
     }
 
@@ -107,7 +116,7 @@ export class WhatsappService {
       return;
     }
 
-    if (this.socket && this.connected) {
+    if (this.connected && this.socket) {
       return;
     }
 
@@ -144,7 +153,6 @@ export class WhatsappService {
           this.socket = socket;
           console.log('--- WhatsApp conectado correctamente ---');
           console.log('Usuario:', socket.user);
-          return;
         }
 
         if (connection === 'close') {
@@ -152,8 +160,7 @@ export class WhatsappService {
           console.log(`Conexión cerrada. Código: ${statusCode}`);
           
           this.connected = false;
-          // No seteamos this.socket = null aquí para permitir que getStatus vea el último estado si es posible
-          // pero si es logout, entonces sí limpiamos todo
+          this.socket = null;
           
           if (statusCode !== DisconnectReason.loggedOut) {
             console.warn('Reintentando conexión en 5 segundos...');
@@ -161,16 +168,14 @@ export class WhatsappService {
               void this.connect();
             }, 5000);
           } else {
-            this.socket = null;
             this.latestQr = null;
+            this.clearSession();
             console.warn(
               'La sesión de WhatsApp fue cerrada por logout. Debes volver a vincular el dispositivo.',
             );
           }
         }
       });
-
-      this.socket = socket;
     } catch (error) {
       this.connected = false;
       this.socket = null;
