@@ -21,19 +21,6 @@ export class WhatsappService {
     this.connect().catch(err => {
       console.error('WhatsApp init failed silently', err);
     });
-
-    // Evitar spin-down de Render (duerme a los 15 min de inactividad)
-    const selfUrl = process.env.RENDER_EXTERNAL_URL;
-    if (selfUrl) {
-      setInterval(async () => {
-        try {
-          await fetch(`${selfUrl}/whatsapp/status`);
-          console.log('Keep-alive ping OK');
-        } catch (e: any) {
-          console.warn('Keep-alive ping falló:', e.message);
-        }
-      }, 14 * 60 * 1000); // cada 14 minutos
-    }
   }
 
   async sendTextToPhone(phoneNumber: string, text: string): Promise<void> {
@@ -120,18 +107,18 @@ export class WhatsappService {
     if (!this.connected) {
       await this.connect();
     }
-    // De 10s → 30s para tolerar el cold start de Render
-    await this.waitForConnection(30000);
+
+    await this.waitForConnection();
   }
 
   private async connect() {
     if (this.initializing) {
-      // Si ya está iniciando, simplemente esperar a que termine
-      await this.waitForConnection(30000);
       return;
     }
 
-    if (this.connected && this.socket) return;
+    if (this.connected && this.socket) {
+      return;
+    }
 
     this.initializing = true;
 
@@ -153,43 +140,42 @@ export class WhatsappService {
       socket.ev.on('connection.update', (update: any) => {
         const { connection, lastDisconnect, qr } = update;
 
+        console.log(`Actualización de conexión: ${connection || 'N/A'}`);
+
         if (qr) {
           this.latestQr = qr;
-          console.log('Nuevo QR generado.');
+          console.log('Se generó un nuevo QR de WhatsApp.');
         }
 
         if (connection === 'open') {
           this.connected = true;
           this.latestQr = null;
           this.socket = socket;
-          console.log('--- WhatsApp conectado ---', socket.user);
+          console.log('--- WhatsApp conectado correctamente ---');
+          console.log('Usuario:', socket.user);
         }
 
         if (connection === 'close') {
           const statusCode = (lastDisconnect?.error as any)?.output?.statusCode;
           console.log(`Conexión cerrada. Código: ${statusCode}`);
+          
           this.connected = false;
           this.socket = null;
-
+          
           if (statusCode !== DisconnectReason.loggedOut) {
             console.warn('Reintentando conexión en 5 segundos...');
-            setTimeout(() => void this.connect(), 5000);
+            setTimeout(() => {
+              void this.connect();
+            }, 5000);
           } else {
             this.latestQr = null;
             this.clearSession();
-            console.warn('Sesión cerrada por logout. Vuelve a vincular.');
+            console.warn(
+              'La sesión de WhatsApp fue cerrada por logout. Debes volver a vincular el dispositivo.',
+            );
           }
         }
       });
-
-      // ✅ CLAVE: esperar aquí a que el socket se conecte (o falle por timeout)
-      //    antes de retornar, para que ensureConnected sepa el estado real
-      await this.waitForConnection(30000).catch(() => {
-        // No lanzar error aquí; si no conectó, el socket sigue en background
-        // y el siguiente intento lo encontrará listo
-        console.warn('connect(): timeout esperando conexión inicial (puede ser QR pendiente)');
-      });
-
     } catch (error) {
       this.connected = false;
       this.socket = null;
