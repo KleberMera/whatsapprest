@@ -52,6 +52,10 @@ router.post('/send', async (req, res) => {
 
 app.use('/whatsapp', router);
 
-app.listen(port, () => {
-  console.log(`WhatsApp service listening at http://localhost:${port}`);
+// app.listen(port, () => {
+//   console.log(`WhatsApp service listening at http://localhost:${port}`);
+// });
+
+app.listen(4000, '0.0.0.0', () => {
+  console.log('Servidor escuchando en todas las interfaces');
 });

@@ -13,9 +13,10 @@ dotenv.config();
 
 export class WhatsappService {
   private socket: any = null;
-  private connected = false;
+  private isReady = false;
   private initializing = false;
   private latestQr: string | null = null;
+  private connectingPromise: Promise<void> | null = null;
 
   constructor() {
     this.connect().catch(err => {
@@ -23,52 +24,54 @@ export class WhatsappService {
     });
   }
 
-  async sendTextToPhone(phoneNumber: string, text: string): Promise<void> {
-    await this.ensureConnected();
+  async sendTextToPhone(phoneNumber: string, text: string, retry = true): Promise<void> {
+    await this.waitForReady();
 
-    if (!this.socket) {
-      throw new Error('La conexión de WhatsApp no está disponible');
+    if (!this.socket || !this.isReady) {
+      throw new Error('WhatsApp no está conectado o no está listo');
     }
 
     const jid = this.toWhatsAppJid(phoneNumber);
     console.log(`Intentando enviar mensaje a: ${phoneNumber} -> JID: ${jid}`);
-    
+
     try {
-      // Verificar si el número existe en WhatsApp antes de enviar
       const [resultExist] = await this.socket.onWhatsApp(jid);
-      
       if (!resultExist || !resultExist.exists) {
         console.warn(`El número ${phoneNumber} no parece estar registrado en WhatsApp (JID: ${jid})`);
-        // Intentamos enviar de todos modos por si acaso, pero avisamos
       } else {
         console.log(`Número verificado en WhatsApp: ${resultExist.jid}`);
       }
 
       const finalJid = resultExist?.jid || jid;
       const result = await this.socket.sendMessage(finalJid, { text });
-      console.log('Resultado del envío:', result ? 'Enviado correctamente (ID: ' + result.key.id + ')' : 'Sin respuesta del socket');
-    } catch (error) {
-      console.error('Error al ejecutar sendMessage o onWhatsApp en el socket:', error);
-      throw error;
+      console.log('✅ Mensaje enviado correctamente (ID: ' + result.key.id + ')');
+    } catch (error: any) {
+      console.error('Error al enviar:', error);
+      // Si falla y es la primera vez, reintentamos una vez después de 2 segundos
+      if (retry && (error.message?.includes('not ready') || error.message?.includes('connection'))) {
+        console.log('Reintentando envío en 2 segundos...');
+        await new Promise(r => setTimeout(r, 2000));
+        return this.sendTextToPhone(phoneNumber, text, false);
+      }
+      throw new Error(`Error al enviar mensaje: ${error.message}`);
     }
   }
 
   getStatus() {
     return {
-      connected: this.connected,
+      connected: this.isReady,
       hasQr: Boolean(this.latestQr),
-      user: this.connected ? this.socket?.user : null
+      user: this.isReady ? this.socket?.user : null,
     };
   }
 
   getQr() {
-    if (!this.connected && !this.initializing && !this.latestQr) {
+    if (!this.isReady && !this.initializing && !this.latestQr) {
       console.log('No hay conexión activa ni QR, intentando conectar...');
       this.connect().catch(err => console.error('connect error', err));
     }
-    
     return {
-      connected: this.connected,
+      connected: this.isReady,
       qr: this.latestQr,
     };
   }
@@ -82,49 +85,66 @@ export class WhatsappService {
       }
       this.socket = null;
     }
-    
-    this.connected = false;
+    this.isReady = false;
     this.latestQr = null;
-
+    this.connectingPromise = null;
     this.clearSession();
     console.log('Sesión de WhatsApp cerrada correctamente');
   }
 
   private clearSession() {
-    const authDir =
-      process.env.WHATSAPP_AUTH_DIR ?? path.join(process.cwd(), 'whatsapp-session');
+    const authDir = process.env.WHATSAPP_AUTH_DIR ?? path.join(process.cwd(), 'whatsapp-session');
     if (fs.existsSync(authDir)) {
       try {
         fs.rmSync(authDir, { recursive: true, force: true });
-        console.log('Archivos de sesión eliminados correctamente');
+        console.log('Archivos de sesión eliminados');
       } catch (error) {
-        console.error('Error eliminando archivos de sesión:', error);
+        console.error('Error eliminando sesión:', error);
       }
     }
   }
 
-  private async ensureConnected() {
-    if (!this.connected) {
-      await this.connect();
+  private async waitForReady(timeoutMs = 15000): Promise<void> {
+    if (this.isReady && this.socket) {
+      return;
     }
 
-    await this.waitForConnection();
+    await this.connect();
+
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (this.isReady && this.socket) {
+        return;
+      }
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+    throw new Error('Timeout esperando que WhatsApp esté listo');
   }
 
-  private async connect() {
-    if (this.initializing) {
+  private async connect(): Promise<void> {
+    if (this.connectingPromise) {
+      return this.connectingPromise;
+    }
+    if (this.isReady && this.socket) {
       return;
     }
+    this.connectingPromise = this.doConnect();
+    try {
+      await this.connectingPromise;
+    } finally {
+      this.connectingPromise = null;
+    }
+  }
 
-    if (this.connected && this.socket) {
-      return;
-    }
+  private async doConnect(): Promise<void> {
+    if (this.initializing) return;
+    if (this.isReady && this.socket) return;
 
     this.initializing = true;
+    this.isReady = false;
 
     try {
-      const authDir =
-        process.env.WHATSAPP_AUTH_DIR ?? path.join(process.cwd(), 'whatsapp-session');
+      const authDir = process.env.WHATSAPP_AUTH_DIR ?? path.join(process.cwd(), 'whatsapp-session');
       const { state, saveCreds } = await useMultiFileAuthState(authDir);
       const { version } = await fetchLatestBaileysVersion();
 
@@ -137,92 +157,84 @@ export class WhatsappService {
       });
 
       socket.ev.on('creds.update', saveCreds);
-      socket.ev.on('connection.update', (update: any) => {
-        const { connection, lastDisconnect, qr } = update;
 
-        console.log(`Actualización de conexión: ${connection || 'N/A'}`);
+      // Promesa que se resuelve después de una espera fija + verificación de usuario
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error('Timeout esperando conexión de WhatsApp'));
+        }, 20000);
 
-        if (qr) {
-          this.latestQr = qr;
-          console.log('Se generó un nuevo QR de WhatsApp.');
-        }
+        socket.ev.on('connection.update', async (update: any) => {
+          const { connection, lastDisconnect, qr } = update;
 
-        if (connection === 'open') {
-          this.connected = true;
-          this.latestQr = null;
-          this.socket = socket;
-          console.log('--- WhatsApp conectado correctamente ---');
-          console.log('Usuario:', socket.user);
-        }
-
-        if (connection === 'close') {
-          const statusCode = (lastDisconnect?.error as any)?.output?.statusCode;
-          console.log(`Conexión cerrada. Código: ${statusCode}`);
-          
-          this.connected = false;
-          this.socket = null;
-          
-          if (statusCode !== DisconnectReason.loggedOut) {
-            console.warn('Reintentando conexión en 5 segundos...');
-            setTimeout(() => {
-              void this.connect();
-            }, 5000);
-          } else {
-            this.latestQr = null;
-            this.clearSession();
-            console.warn(
-              'La sesión de WhatsApp fue cerrada por logout. Debes volver a vincular el dispositivo.',
-            );
+          if (qr) {
+            this.latestQr = qr;
+            console.log('Nuevo QR generado');
           }
-        }
+
+          if (connection === 'open') {
+            clearTimeout(timeout);
+            this.socket = socket;
+            this.latestQr = null;
+
+            // Esperamos 1.5 segundos para que Baileys termine la negociación interna
+            await new Promise(r => setTimeout(r, 1500));
+
+            // Verificación adicional: el socket debe tener un usuario
+            if (!socket.user || !socket.user.id) {
+              reject(new Error('Socket abierto pero usuario no autenticado'));
+              return;
+            }
+
+            this.isReady = true;
+            console.log('✅ WhatsApp conectado y listo para enviar mensajes');
+            console.log('Usuario:', socket.user);
+            resolve();
+          }
+
+          if (connection === 'close') {
+            clearTimeout(timeout);
+            const statusCode = (lastDisconnect?.error as any)?.output?.statusCode;
+            console.log(`Conexión cerrada. Código: ${statusCode}`);
+            this.isReady = false;
+            this.socket = null;
+
+            if (statusCode !== DisconnectReason.loggedOut) {
+              console.warn('Reintentando conexión en 5 segundos...');
+              setTimeout(() => {
+                void this.connect();
+              }, 5000);
+            } else {
+              this.latestQr = null;
+              this.clearSession();
+              console.warn('Sesión cerrada por logout. Escanea el QR nuevamente.');
+            }
+            reject(new Error(`Conexión cerrada con código ${statusCode}`));
+          }
+        });
       });
     } catch (error) {
-      this.connected = false;
+      this.isReady = false;
       this.socket = null;
-      console.error('No fue posible inicializar WhatsApp', error);
       throw error;
     } finally {
       this.initializing = false;
     }
   }
 
-  private async waitForConnection(timeoutMs = 10000) {
-    const startedAt = Date.now();
-
-    while (!this.connected) {
-      if (Date.now() - startedAt > timeoutMs) {
-        throw new Error('Tiempo de espera agotado esperando la conexión de WhatsApp');
-      }
-
-      await new Promise((resolve) => setTimeout(resolve, 250));
-    }
-  }
-
   private toWhatsAppJid(phoneNumber: string): string {
     let digits = phoneNumber.replace(/\D/g, '');
-
-    if (!digits) {
-      throw new Error('Número de teléfono inválido');
-    }
+    if (!digits) throw new Error('Número de teléfono inválido');
 
     const countryCode = process.env.WHATSAPP_COUNTRY_CODE ?? '593';
-
-    // Si el número empieza con el código de país
     if (digits.startsWith(countryCode)) {
-      // Quitamos el código de país temporalmente para limpiar el número local
       let local = digits.slice(countryCode.length);
-      // En Ecuador y otros países, a veces incluyen un '0' después del código de país (ej: 593 099...)
-      // Para WhatsApp, ese '0' debe eliminarse.
-      if (local.startsWith('0')) {
-        local = local.slice(1);
-      }
+      if (local.startsWith('0')) local = local.slice(1);
       digits = countryCode + local;
     } else {
-      // Si no tiene código de país, quitamos el '0' inicial si lo tiene y lo añadimos
       const local = digits.startsWith('0') ? digits.slice(1) : digits;
       digits = countryCode + local;
     }
-
     return `${digits}@s.whatsapp.net`;
   }
 }
