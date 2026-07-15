@@ -2,7 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import { WhatsappService } from './whatsapp.service';
 import dotenv from 'dotenv';
-
+import QRCode from 'qrcode';
 dotenv.config();
 
 const app = express();
@@ -49,7 +49,22 @@ router.post('/send', async (req, res) => {
     res.status(500).json({ error: error.message || 'Error sending message' });
   }
 });
+router.get('/qr-view', async (req, res) => {
+  const data = whatsappService.getQr();
 
+  if (!data.qr) {
+    return res.send('No hay QR disponible');
+  }
+
+  res.send(`
+    <html>
+      <body>
+        <h2>Escanea este QR con WhatsApp</h2>
+        <img src="https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(data.qr)}"/>
+      </body>
+    </html>
+  `);
+});
 app.use('/whatsapp', router);
 
 // app.listen(port, () => {

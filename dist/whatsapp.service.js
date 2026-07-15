@@ -133,7 +133,12 @@ class WhatsappService {
         if (this.isReady && this.socket) {
             return;
         }
-        await this.connect();
+        try {
+            await this.connect();
+        }
+        catch (error) {
+            console.error('Error conectando WhatsApp:', error);
+        }
         const start = Date.now();
         while (Date.now() - start < timeoutMs) {
             if (this.isReady && this.socket) {
@@ -180,8 +185,9 @@ class WhatsappService {
             // Promesa que se resuelve después de una espera fija + verificación de usuario
             await new Promise((resolve, reject) => {
                 const timeout = setTimeout(() => {
-                    reject(new Error('Timeout esperando conexión de WhatsApp'));
-                }, 20000);
+                    console.warn('Tiempo agotado esperando conexión de WhatsApp');
+                    resolve();
+                }, 120000);
                 socket.ev.on('connection.update', async (update) => {
                     const { connection, lastDisconnect, qr } = update;
                     if (qr) {
@@ -221,7 +227,7 @@ class WhatsappService {
                             this.clearSession();
                             console.warn('Sesión cerrada por logout. Escanea el QR nuevamente.');
                         }
-                        reject(new Error(`Conexión cerrada con código ${statusCode}`));
+                        resolve();
                     }
                 });
             });

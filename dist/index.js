@@ -43,7 +43,24 @@ router.post('/send', async (req, res) => {
         res.status(500).json({ error: error.message || 'Error sending message' });
     }
 });
+router.get('/qr-view', async (req, res) => {
+    const data = whatsappService.getQr();
+    if (!data.qr) {
+        return res.send('No hay QR disponible');
+    }
+    res.send(`
+    <html>
+      <body>
+        <h2>Escanea este QR con WhatsApp</h2>
+        <img src="https://api.qrserver.com/v1/create-qr-code/?size=300x300&data=${encodeURIComponent(data.qr)}"/>
+      </body>
+    </html>
+  `);
+});
 app.use('/whatsapp', router);
-app.listen(port, () => {
-    console.log(`WhatsApp service listening at http://localhost:${port}`);
+// app.listen(port, () => {
+//   console.log(`WhatsApp service listening at http://localhost:${port}`);
+// });
+app.listen(4000, '0.0.0.0', () => {
+    console.log('Servidor escuchando en todas las interfaces');
 });
